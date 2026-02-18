@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import './App.css'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
@@ -39,19 +39,15 @@ function getHealthLabel(service, latestLog) {
   if (!service.is_active) {
     return 'Degraded'
   }
-
   if (!latestLog) {
     return 'Degraded'
   }
-
   if (!latestLog.is_success || latestLog.status_code >= 500) {
     return 'Incident'
   }
-
   if (latestLog.status_code >= 400) {
     return 'Degraded'
   }
-
   return 'Healthy'
 }
 
@@ -59,7 +55,6 @@ function computeServiceUptime(logs) {
   if (!logs.length) {
     return '--'
   }
-
   const successCount = logs.filter((entry) => entry.is_success).length
   const percent = (successCount / logs.length) * 100
   return `${percent.toFixed(2)}%`
@@ -79,8 +74,14 @@ function buildChartBars(allLogs) {
   return slice.map((value) => Math.max(20, Math.round((value / max) * 100)))
 }
 
-async function fetchJson(path) {
-  const response = await fetch(`${API_BASE_URL}${path}`)
+async function fetchJson(path, options = {}) {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+    },
+    ...options,
+  })
 
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`
@@ -95,15 +96,24 @@ async function fetchJson(path) {
     throw new Error(detail)
   }
 
+  if (response.status === 204) {
+    return null
+  }
+
   return response.json()
 }
 
 function App() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
+  const [submitting, setSubmitting] = useState(false)
   const [errorMessage, setErrorMessage] = useState('')
+  const [actionMessage, setActionMessage] = useState('')
   const [lastSync, setLastSync] = useState('')
   const [project, setProject] = useState(null)
+  const [projectsCount, setProjectsCount] = useState(0)
+  const [selectedProjectId, setSelectedProjectId] = useState(null)
+  const [defaultOwnerId, setDefaultOwnerId] = useState(null)
   const [services, setServices] = useState([])
   const [alerts, setAlerts] = useState([])
   const [logs, setLogs] = useState([])
@@ -111,10 +121,8 @@ function App() {
   const [chartBars, setChartBars] = useState(FALLBACK_CHART)
   const [page, setPage] = useState(1)
 
-  useEffect(() => {
-    let mounted = true
-
-    const load = async (initialLoad = false) => {
+  const loadDashboard = useCallback(
+    async (initialLoad = false) => {
       if (initialLoad) {
         setLoading(true)
       } else {
@@ -122,11 +130,11 @@ function App() {
       }
 
       try {
-        const projects = await fetchJson('/projects?skip=0&limit=1')
-        if (!projects.length) {
-          if (!mounted) {
-            return
-          }
+        const allProjects = await fetchJson('/projects/?skip=0&limit=100')
+        const sortedProjects = [...allProjects].sort((a, b) => b.id - a.id)
+        setProjectsCount(sortedProjects.length)
+
+        if (!sortedProjects.length) {
           setProject(null)
           setServices([])
           setAlerts([])
@@ -138,17 +146,22 @@ function App() {
             { label: 'Checks / hour', value: '0', change: 'No checks', trend: 'up' },
           ])
           setChartBars(FALLBACK_CHART)
-          setErrorMessage('No project found. Create a project in backend first.')
+          setErrorMessage('No project found. Use the Create project button to add one.')
           return
         }
 
-        const activeProject = projects[0]
-        const serviceList = await fetchJson(`/projects/${activeProject.id}/services?skip=0&limit=100`)
+        const activeProject =
+          sortedProjects.find((item) => item.id === selectedProjectId) || sortedProjects[0]
+
+        setSelectedProjectId(activeProject.id)
+        setDefaultOwnerId(activeProject.owner_id)
+
+        const serviceList = await fetchJson(`/projects/${activeProject.id}/services/?skip=0&limit=100`)
 
         const logsPerService = await Promise.all(
           serviceList.map(async (service) => {
             const serviceLogs = await fetchJson(
-              `/projects/${activeProject.id}/services/${service.id}/logs?skip=0&limit=50`,
+              `/projects/${activeProject.id}/services/${service.id}/logs/?skip=0&limit=50`,
             )
             return { service, logs: serviceLogs }
           }),
@@ -234,10 +247,6 @@ function App() {
           },
         ]
 
-        if (!mounted) {
-          return
-        }
-
         setProject(activeProject)
         setServices(mappedServices)
         setAlerts(mappedAlerts)
@@ -248,29 +257,102 @@ function App() {
         setPage(1)
         setLastSync(new Date().toLocaleTimeString())
       } catch (error) {
-        if (!mounted) {
-          return
-        }
         setErrorMessage(
           `Backend sync failed: ${error.message}. Make sure backend is running at ${API_BASE_URL}.`,
         )
       } finally {
-        if (!mounted) {
-          return
-        }
         setLoading(false)
         setRefreshing(false)
       }
+    },
+    [selectedProjectId],
+  )
+
+  useEffect(() => {
+    loadDashboard(true)
+    const intervalId = setInterval(() => loadDashboard(false), 60000)
+    return () => clearInterval(intervalId)
+  }, [loadDashboard])
+
+  const handleCreateProject = async () => {
+    const name = window.prompt('Project name:')
+    if (!name) {
+      return
     }
 
-    load(true)
-    const intervalId = setInterval(() => load(false), 60000)
+    setSubmitting(true)
+    setActionMessage('')
 
-    return () => {
-      mounted = false
-      clearInterval(intervalId)
+    try {
+      let ownerId = defaultOwnerId
+      if (!ownerId) {
+        const timestamp = Date.now()
+        const demoUser = await fetchJson('/auth/register', {
+          method: 'POST',
+          body: JSON.stringify({
+            email: `demo_owner_${timestamp}@example.com`,
+            password: 'password123',
+          }),
+        })
+        ownerId = demoUser.id
+        setDefaultOwnerId(ownerId)
+      }
+
+      const created = await fetchJson(`/projects/?owner_id=${ownerId}`, {
+        method: 'POST',
+        body: JSON.stringify({ name }),
+      })
+      setSelectedProjectId(created.id)
+      setActionMessage(`Project created: ${created.name}`)
+      await loadDashboard(false)
+    } catch (error) {
+      setActionMessage(`Create project failed: ${error.message}`)
+    } finally {
+      setSubmitting(false)
     }
-  }, [])
+  }
+
+  const handleCreateService = async () => {
+    if (!project) {
+      setActionMessage('Add service failed: create a project first.')
+      return
+    }
+
+    const name = window.prompt('Service name:')
+    if (!name) {
+      return
+    }
+
+    const url = window.prompt('Service URL (health endpoint):', 'https://api.example.com/health')
+    if (!url) {
+      return
+    }
+
+    const methodInput = window.prompt('HTTP method:', 'GET')
+    if (!methodInput) {
+      return
+    }
+
+    setSubmitting(true)
+    setActionMessage('')
+
+    try {
+      const created = await fetchJson(`/projects/${project.id}/services/`, {
+        method: 'POST',
+        body: JSON.stringify({
+          name,
+          url,
+          method: methodInput.toUpperCase(),
+        }),
+      })
+      setActionMessage(`Service added: ${created.name}`)
+      await loadDashboard(false)
+    } catch (error) {
+      setActionMessage(`Add service failed: ${error.message}`)
+    } finally {
+      setSubmitting(false)
+    }
+  }
 
   const totalPages = Math.max(1, Math.ceil(logs.length / LOGS_PAGE_SIZE))
   const visibleLogs = useMemo(() => {
@@ -305,8 +387,10 @@ function App() {
         <div className="sidebar-card">
           <p className="sidebar-label">Active Project</p>
           <h3>{project?.name || 'No Project'}</h3>
-          <p className="sidebar-meta">{services.length} services</p>
-          <button className="primary">New Service</button>
+          <p className="sidebar-meta">{services.length} services • {projectsCount} projects</p>
+          <button className="primary" onClick={handleCreateService} disabled={submitting}>
+            New Service
+          </button>
         </div>
       </aside>
 
@@ -322,10 +406,20 @@ function App() {
             </p>
           </div>
           <div className="topbar-actions">
-            <button className="ghost">View logs</button>
-            <button className="primary">Create project</button>
+            <button className="ghost" onClick={() => loadDashboard(false)} disabled={submitting}>
+              Refresh
+            </button>
+            <button className="primary" onClick={handleCreateProject} disabled={submitting}>
+              Create project
+            </button>
           </div>
         </header>
+
+        {actionMessage && (
+          <section className="card">
+            <p className="muted">{actionMessage}</p>
+          </section>
+        )}
 
         {errorMessage && (
           <section className="card">
@@ -361,7 +455,9 @@ function App() {
                 <h3>Service Health</h3>
                 <p className="muted">Current status and response time across services</p>
               </div>
-              <button className="ghost">Add service</button>
+              <button className="ghost" onClick={handleCreateService} disabled={submitting}>
+                Add service
+              </button>
             </div>
             <div className="table">
               <div className="table-row table-head">
@@ -392,7 +488,9 @@ function App() {
                 <h3>Active Alerts</h3>
                 <p className="muted">Detected from latest service checks</p>
               </div>
-              <button className="ghost">Manage</button>
+              <button className="ghost" disabled>
+                Manage
+              </button>
             </div>
             <div className="alert-list">
               {alerts.length === 0 && <p className="muted">No active alerts.</p>}
@@ -426,8 +524,12 @@ function App() {
               <p className="muted">Live data from backend log endpoints</p>
             </div>
             <div className="topbar-actions">
-              <button className="ghost">Export CSV</button>
-              <button className="ghost">Filter</button>
+              <button className="ghost" disabled>
+                Export CSV
+              </button>
+              <button className="ghost" disabled>
+                Filter
+              </button>
             </div>
           </div>
           <div className="table">
