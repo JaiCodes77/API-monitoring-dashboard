@@ -1,23 +1,23 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict 
-
-class ServiceCreate(BaseModel): 
-    service_id : int 
-    status_code : int 
-    response_time_ms : int 
-    is_success : bool 
-    message : Optional[str] = None
+from pydantic import BaseModel, ConfigDict
 
 
-class ServiceOut(BaseModel):
+class LogCreate(BaseModel):
+    status_code: int
+    response_time_ms: int
+    is_success: bool
+    message: Optional[str] = None
+
+
+class LogOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-    
-    id : int 
-    service_id : int 
-    status_code : int 
-    response_time_ms : int
-    is_success : bool 
-    message : Optional[str] = None
-    created_at : datetime
+
+    id: int
+    service_id: int
+    status_code: int
+    response_time_ms: int
+    is_success: bool
+    message: Optional[str] = None
+    created_at: datetime

@@ -1,108 +1,289 @@
+import { useEffect, useMemo, useState } from 'react'
 import './App.css'
 
-const stats = [
-  { label: 'Uptime (30d)', value: '99.94%', change: '+0.08%', trend: 'up' },
-  { label: 'Avg Response', value: '182 ms', change: '-16 ms', trend: 'up' },
-  { label: 'Incidents', value: '3', change: '-2', trend: 'up' },
-  { label: 'Checks / hour', value: '1,440', change: '+4%', trend: 'up' },
-]
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+const LOGS_PAGE_SIZE = 5
+const FALLBACK_CHART = [62, 54, 58, 72, 64, 78, 88, 74, 69, 80, 92, 86]
 
-const services = [
-  {
-    name: 'Auth Gateway',
-    url: 'https://api.example.com/auth/health',
-    status: 'Healthy',
-    response: '164 ms',
-    uptime: '99.98%',
-    region: 'us-east-1',
-  },
-  {
-    name: 'Payments Core',
-    url: 'https://api.example.com/payments/health',
-    status: 'Degraded',
-    response: '412 ms',
-    uptime: '99.62%',
-    region: 'us-west-2',
-  },
-  {
-    name: 'Notifications',
-    url: 'https://api.example.com/notify/health',
-    status: 'Healthy',
-    response: '138 ms',
-    uptime: '99.91%',
-    region: 'eu-central-1',
-  },
-  {
-    name: 'User Profile',
-    url: 'https://api.example.com/profile/health',
-    status: 'Incident',
-    response: '—',
-    uptime: '98.73%',
-    region: 'us-east-1',
-  },
-]
+function formatLatency(ms) {
+  if (ms === null || ms === undefined) {
+    return '--'
+  }
+  return `${ms} ms`
+}
 
-const logs = [
-  {
-    id: 'LG-10492',
-    service: 'Payments Core',
-    code: 502,
-    latency: '1,202 ms',
-    time: '2 min ago',
-    detail: 'Bad gateway from upstream provider',
-  },
-  {
-    id: 'LG-10491',
-    service: 'Auth Gateway',
-    code: 200,
-    latency: '148 ms',
-    time: '4 min ago',
-    detail: 'Token refreshed',
-  },
-  {
-    id: 'LG-10490',
-    service: 'User Profile',
-    code: 503,
-    latency: '—',
-    time: '6 min ago',
-    detail: 'Service unavailable',
-  },
-  {
-    id: 'LG-10489',
-    service: 'Notifications',
-    code: 200,
-    latency: '133 ms',
-    time: '9 min ago',
-    detail: 'Health check ok',
-  },
-  {
-    id: 'LG-10488',
-    service: 'Payments Core',
-    code: 500,
-    latency: '962 ms',
-    time: '12 min ago',
-    detail: 'Timeout on charge',
-  },
-]
+function formatRelativeTime(dateValue) {
+  const date = new Date(dateValue)
+  const now = new Date()
+  const seconds = Math.max(0, Math.floor((now.getTime() - date.getTime()) / 1000))
 
-const alerts = [
-  {
-    title: 'User Profile',
-    status: 'Incident',
-    time: 'Started 12 min ago',
-    message: 'Health endpoint failing from us-east-1',
-  },
-  {
-    title: 'Payments Core',
-    status: 'Degraded',
-    time: 'Ongoing for 43 min',
-    message: 'High p95 latency on /charge',
-  },
-]
+  if (seconds < 60) {
+    return `${seconds} sec ago`
+  }
 
-const chartBars = [62, 54, 58, 72, 64, 78, 88, 74, 69, 80, 92, 86]
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) {
+    return `${minutes} min ago`
+  }
+
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) {
+    return `${hours} hr ago`
+  }
+
+  const days = Math.floor(hours / 24)
+  return `${days} day ago`
+}
+
+function getHealthLabel(service, latestLog) {
+  if (!service.is_active) {
+    return 'Degraded'
+  }
+
+  if (!latestLog) {
+    return 'Degraded'
+  }
+
+  if (!latestLog.is_success || latestLog.status_code >= 500) {
+    return 'Incident'
+  }
+
+  if (latestLog.status_code >= 400) {
+    return 'Degraded'
+  }
+
+  return 'Healthy'
+}
+
+function computeServiceUptime(logs) {
+  if (!logs.length) {
+    return '--'
+  }
+
+  const successCount = logs.filter((entry) => entry.is_success).length
+  const percent = (successCount / logs.length) * 100
+  return `${percent.toFixed(2)}%`
+}
+
+function buildChartBars(allLogs) {
+  const withLatency = allLogs
+    .map((entry) => entry.response_time_ms)
+    .filter((value) => typeof value === 'number' && value > 0)
+
+  if (!withLatency.length) {
+    return FALLBACK_CHART
+  }
+
+  const slice = withLatency.slice(0, 12)
+  const max = Math.max(...slice)
+  return slice.map((value) => Math.max(20, Math.round((value / max) * 100)))
+}
+
+async function fetchJson(path) {
+  const response = await fetch(`${API_BASE_URL}${path}`)
+
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`
+    try {
+      const errorBody = await response.json()
+      if (errorBody?.detail) {
+        detail = String(errorBody.detail)
+      }
+    } catch {
+      // keep default detail
+    }
+    throw new Error(detail)
+  }
+
+  return response.json()
+}
 
 function App() {
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState(false)
+  const [errorMessage, setErrorMessage] = useState('')
+  const [lastSync, setLastSync] = useState('')
+  const [project, setProject] = useState(null)
+  const [services, setServices] = useState([])
+  const [alerts, setAlerts] = useState([])
+  const [logs, setLogs] = useState([])
+  const [stats, setStats] = useState([])
+  const [chartBars, setChartBars] = useState(FALLBACK_CHART)
+  const [page, setPage] = useState(1)
+
+  useEffect(() => {
+    let mounted = true
+
+    const load = async (initialLoad = false) => {
+      if (initialLoad) {
+        setLoading(true)
+      } else {
+        setRefreshing(true)
+      }
+
+      try {
+        const projects = await fetchJson('/projects?skip=0&limit=1')
+        if (!projects.length) {
+          if (!mounted) {
+            return
+          }
+          setProject(null)
+          setServices([])
+          setAlerts([])
+          setLogs([])
+          setStats([
+            { label: 'Uptime (30d)', value: '--', change: 'No logs', trend: 'up' },
+            { label: 'Avg Response', value: '--', change: 'No logs', trend: 'up' },
+            { label: 'Incidents', value: '0', change: 'No services', trend: 'up' },
+            { label: 'Checks / hour', value: '0', change: 'No checks', trend: 'up' },
+          ])
+          setChartBars(FALLBACK_CHART)
+          setErrorMessage('No project found. Create a project in backend first.')
+          return
+        }
+
+        const activeProject = projects[0]
+        const serviceList = await fetchJson(`/projects/${activeProject.id}/services?skip=0&limit=100`)
+
+        const logsPerService = await Promise.all(
+          serviceList.map(async (service) => {
+            const serviceLogs = await fetchJson(
+              `/projects/${activeProject.id}/services/${service.id}/logs?skip=0&limit=50`,
+            )
+            return { service, logs: serviceLogs }
+          }),
+        )
+
+        const mergedLogs = logsPerService
+          .flatMap(({ service, logs: serviceLogs }) =>
+            serviceLogs.map((entry) => ({
+              ...entry,
+              service_name: service.name,
+            })),
+          )
+          .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+
+        const mappedServices = logsPerService.map(({ service, logs: serviceLogs }) => {
+          const latestLog = serviceLogs[0]
+          return {
+            id: service.id,
+            name: service.name,
+            url: service.url,
+            status: getHealthLabel(service, latestLog),
+            response: latestLog ? formatLatency(latestLog.response_time_ms) : '--',
+            uptime: computeServiceUptime(serviceLogs),
+            region: 'n/a',
+          }
+        })
+
+        const mappedAlerts = mappedServices
+          .filter((service) => service.status !== 'Healthy')
+          .map((service) => ({
+            title: service.name,
+            status: service.status,
+            time: 'Needs attention',
+            message: `Status is ${service.status.toLowerCase()} for ${service.name}`,
+          }))
+
+        const oneHourAgo = Date.now() - 60 * 60 * 1000
+        const checksLastHour = mergedLogs.filter(
+          (entry) => new Date(entry.created_at).getTime() >= oneHourAgo,
+        ).length
+
+        const avgResponseFromSuccess = mergedLogs.filter((entry) => entry.response_time_ms > 0)
+        const avgResponse = avgResponseFromSuccess.length
+          ? Math.round(
+              avgResponseFromSuccess.reduce((sum, entry) => sum + entry.response_time_ms, 0) /
+                avgResponseFromSuccess.length,
+            )
+          : 0
+
+        const overallUptime = mergedLogs.length
+          ? (
+              (mergedLogs.filter((entry) => entry.is_success).length / mergedLogs.length) *
+              100
+            ).toFixed(2)
+          : '--'
+
+        const incidentCount = mappedServices.filter((service) => service.status === 'Incident').length
+
+        const mappedStats = [
+          {
+            label: 'Uptime (30d)',
+            value: overallUptime === '--' ? '--' : `${overallUptime}%`,
+            change: `${mergedLogs.length} checks`,
+            trend: 'up',
+          },
+          {
+            label: 'Avg Response',
+            value: avgResponse ? `${avgResponse} ms` : '--',
+            change: `${avgResponseFromSuccess.length} logs`,
+            trend: 'up',
+          },
+          {
+            label: 'Incidents',
+            value: String(incidentCount),
+            change: `${mappedServices.length} services`,
+            trend: 'up',
+          },
+          {
+            label: 'Checks / hour',
+            value: String(checksLastHour),
+            change: 'Rolling 60m',
+            trend: 'up',
+          },
+        ]
+
+        if (!mounted) {
+          return
+        }
+
+        setProject(activeProject)
+        setServices(mappedServices)
+        setAlerts(mappedAlerts)
+        setLogs(mergedLogs)
+        setStats(mappedStats)
+        setChartBars(buildChartBars(mergedLogs))
+        setErrorMessage('')
+        setPage(1)
+        setLastSync(new Date().toLocaleTimeString())
+      } catch (error) {
+        if (!mounted) {
+          return
+        }
+        setErrorMessage(
+          `Backend sync failed: ${error.message}. Make sure backend is running at ${API_BASE_URL}.`,
+        )
+      } finally {
+        if (!mounted) {
+          return
+        }
+        setLoading(false)
+        setRefreshing(false)
+      }
+    }
+
+    load(true)
+    const intervalId = setInterval(() => load(false), 60000)
+
+    return () => {
+      mounted = false
+      clearInterval(intervalId)
+    }
+  }, [])
+
+  const totalPages = Math.max(1, Math.ceil(logs.length / LOGS_PAGE_SIZE))
+  const visibleLogs = useMemo(() => {
+    const start = (page - 1) * LOGS_PAGE_SIZE
+    return logs.slice(start, start + LOGS_PAGE_SIZE)
+  }, [logs, page])
+
+  useEffect(() => {
+    if (page > totalPages) {
+      setPage(totalPages)
+    }
+  }, [page, totalPages])
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -123,8 +304,8 @@ function App() {
         </nav>
         <div className="sidebar-card">
           <p className="sidebar-label">Active Project</p>
-          <h3>Fintech Core</h3>
-          <p className="sidebar-meta">4 services • 2 regions</p>
+          <h3>{project?.name || 'No Project'}</h3>
+          <p className="sidebar-meta">{services.length} services</p>
           <button className="primary">New Service</button>
         </div>
       </aside>
@@ -133,14 +314,24 @@ function App() {
         <header className="topbar">
           <div>
             <p className="eyebrow">Status Overview</p>
-            <h1>Good afternoon, Jai</h1>
-            <p className="muted">Monitors run every 60 seconds. Last sync 24 sec ago.</p>
+            <h1>Backend Connected Dashboard</h1>
+            <p className="muted">
+              {loading
+                ? 'Loading live monitoring data...'
+                : `Last sync ${lastSync || '--'}${refreshing ? ' (refreshing...)' : ''}`}
+            </p>
           </div>
           <div className="topbar-actions">
             <button className="ghost">View logs</button>
             <button className="primary">Create project</button>
           </div>
         </header>
+
+        {errorMessage && (
+          <section className="card">
+            <p className="muted">{errorMessage}</p>
+          </section>
+        )}
 
         <section className="stats">
           {stats.map((item) => (
@@ -168,7 +359,7 @@ function App() {
             <div className="card-header">
               <div>
                 <h3>Service Health</h3>
-                <p className="muted">Current status and response time across regions</p>
+                <p className="muted">Current status and response time across services</p>
               </div>
               <button className="ghost">Add service</button>
             </div>
@@ -181,14 +372,12 @@ function App() {
                 <span>Region</span>
               </div>
               {services.map((service) => (
-                <div className="table-row" key={service.name}>
+                <div className="table-row" key={service.id}>
                   <div>
                     <p className="table-title">{service.name}</p>
                     <p className="muted">{service.url}</p>
                   </div>
-                  <span className={`pill ${service.status.toLowerCase()}`}>
-                    {service.status}
-                  </span>
+                  <span className={`pill ${service.status.toLowerCase()}`}>{service.status}</span>
                   <span>{service.response}</span>
                   <span>{service.uptime}</span>
                   <span className="muted">{service.region}</span>
@@ -201,11 +390,12 @@ function App() {
             <div className="card-header">
               <div>
                 <h3>Active Alerts</h3>
-                <p className="muted">Escalate failures instantly</p>
+                <p className="muted">Detected from latest service checks</p>
               </div>
               <button className="ghost">Manage</button>
             </div>
             <div className="alert-list">
+              {alerts.length === 0 && <p className="muted">No active alerts.</p>}
               {alerts.map((alert) => (
                 <div key={alert.title} className="alert">
                   <div>
@@ -213,9 +403,7 @@ function App() {
                     <p className="muted">{alert.message}</p>
                   </div>
                   <div className="alert-meta">
-                    <span className={`pill ${alert.status.toLowerCase()}`}>
-                      {alert.status}
-                    </span>
+                    <span className={`pill ${alert.status.toLowerCase()}`}>{alert.status}</span>
                     <span className="muted">{alert.time}</span>
                   </div>
                 </div>
@@ -224,8 +412,8 @@ function App() {
             <div className="timeline">
               <div className="timeline-bar" />
               <div>
-                <p className="muted">Next scheduled check</p>
-                <h4>In 36 seconds</h4>
+                <p className="muted">Refresh interval</p>
+                <h4>Every 60 seconds</h4>
               </div>
             </div>
           </div>
@@ -235,7 +423,7 @@ function App() {
           <div className="card-header">
             <div>
               <h3>Recent Logs</h3>
-              <p className="muted">Auto-collected health checks and errors</p>
+              <p className="muted">Live data from backend log endpoints</p>
             </div>
             <div className="topbar-actions">
               <button className="ghost">Export CSV</button>
@@ -251,28 +439,34 @@ function App() {
               <span>Time</span>
               <span>Detail</span>
             </div>
-            {logs.map((log) => (
+            {visibleLogs.map((log) => (
               <div className="table-row" key={log.id}>
-                <span className="mono">{log.id}</span>
-                <span>{log.service}</span>
-                <span className={`pill ${log.code >= 500 ? 'incident' : 'healthy'}`}>
-                  {log.code}
+                <span className="mono">LG-{String(log.id).padStart(5, '0')}</span>
+                <span>{log.service_name}</span>
+                <span className={`pill ${log.status_code >= 500 ? 'incident' : 'healthy'}`}>
+                  {log.status_code}
                 </span>
-                <span>{log.latency}</span>
-                <span className="muted">{log.time}</span>
-                <span className="muted">{log.detail}</span>
+                <span>{formatLatency(log.response_time_ms)}</span>
+                <span className="muted">{formatRelativeTime(log.created_at)}</span>
+                <span className="muted">{log.message || 'Health check result'}</span>
               </div>
             ))}
           </div>
           <div className="pagination">
-            <button className="ghost">Previous</button>
+            <button className="ghost" onClick={() => setPage((prev) => Math.max(1, prev - 1))}>
+              Previous
+            </button>
             <div className="page-indicator">
-              <span className="active">1</span>
-              <span>2</span>
-              <span>3</span>
-              <span>4</span>
+              <span className="active">
+                {page}/{totalPages}
+              </span>
             </div>
-            <button className="ghost">Next</button>
+            <button
+              className="ghost"
+              onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
+            >
+              Next
+            </button>
           </div>
         </section>
       </main>
