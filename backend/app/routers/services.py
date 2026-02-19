@@ -3,9 +3,11 @@ from enum import Enum
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
+from app.core.security import get_current_user
 from app.db.session import get_db
 from app.models.project import Project
 from app.models.service import Service
+from app.models.user import User
 from app.schemas.service import ServiceCreate, ServiceOut, ServiceUpdate
 
 
@@ -17,8 +19,12 @@ class ServiceStatusFilter(str, Enum):
 router = APIRouter(prefix="/projects/{project_id}/services", tags=["services"])
 
 
-def _get_project_or_404(db: Session, project_id: int) -> Project:
-    project = db.get(Project, project_id)
+def _get_project_for_user_or_404(db: Session, project_id: int, user_id: int) -> Project:
+    project = (
+        db.query(Project)
+        .filter(Project.id == project_id, Project.owner_id == user_id)
+        .first()
+    )
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
@@ -31,30 +37,31 @@ def _get_service_or_404(db: Session, project_id: int, service_id: int) -> Servic
         .first()
     )
     if not service:
-        raise HTTPException(status_code=404, detail="Service not found in this project!")
+        raise HTTPException(status_code=404, detail="Service not found in this project")
     return service
-
 
 
 @router.post("/", response_model=ServiceOut, status_code=status.HTTP_201_CREATED)
 def create_service(
-    project_id : int,
-    payload : ServiceCreate,
-    db : Session = Depends(get_db)
+    project_id: int,
+    payload: ServiceCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    _get_project_or_404(db, project_id)
-    
+    _get_project_for_user_or_404(db, project_id, current_user.id)
+
     service = Service(
-        project_id = project_id,
-        name = payload.name,
-        url = str(payload.url),
-        method = payload.method.upper()
-    ) 
+        project_id=project_id,
+        name=payload.name,
+        url=str(payload.url),
+        method=payload.method.upper(),
+    )
 
     db.add(service)
     db.commit()
     db.refresh(service)
     return service
+
 
 @router.get("/", response_model=list[ServiceOut])
 def list_services(
@@ -63,8 +70,9 @@ def list_services(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    _get_project_or_404(db, project_id)
+    _get_project_for_user_or_404(db, project_id, current_user.id)
 
     query = db.query(Service).filter(Service.project_id == project_id)
     if status_filter == ServiceStatusFilter.active:
@@ -80,7 +88,9 @@ def get_service(
     project_id: int,
     service_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
+    _get_project_for_user_or_404(db, project_id, current_user.id)
     return _get_service_or_404(db, project_id, service_id)
 
 
@@ -90,7 +100,9 @@ def update_service(
     service_id: int,
     payload: ServiceUpdate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
+    _get_project_for_user_or_404(db, project_id, current_user.id)
     service = _get_service_or_404(db, project_id, service_id)
 
     update_data = payload.model_dump(exclude_unset=True)
@@ -112,7 +124,9 @@ def delete_service(
     project_id: int,
     service_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
+    _get_project_for_user_or_404(db, project_id, current_user.id)
     service = _get_service_or_404(db, project_id, service_id)
 
     db.delete(service)

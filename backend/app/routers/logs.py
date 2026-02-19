@@ -3,18 +3,31 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
+from app.core.security import get_current_user
 from app.db.session import get_db
 from app.models.log import Log
+from app.models.project import Project
 from app.models.service import Service
+from app.models.user import User
 from app.schemas.log import LogCreate, LogOut
 
 router = APIRouter(prefix="/projects/{project_id}/services/{service_id}/logs", tags=["logs"])
 
 
-def _get_service_or_404(db: Session, project_id: int, service_id: int) -> Service:
+def _get_service_for_user_or_404(
+    db: Session,
+    project_id: int,
+    service_id: int,
+    user_id: int,
+) -> Service:
     service = (
         db.query(Service)
-        .filter(Service.id == service_id, Service.project_id == project_id)
+        .join(Project, Project.id == Service.project_id)
+        .filter(
+            Service.id == service_id,
+            Service.project_id == project_id,
+            Project.owner_id == user_id,
+        )
         .first()
     )
     if not service:
@@ -28,8 +41,9 @@ def create_log(
     service_id: int,
     payload: LogCreate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    _get_service_or_404(db, project_id, service_id)
+    _get_service_for_user_or_404(db, project_id, service_id, current_user.id)
 
     log = Log(
         service_id=service_id,
@@ -55,8 +69,9 @@ def list_logs(
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    _get_service_or_404(db, project_id, service_id)
+    _get_service_for_user_or_404(db, project_id, service_id, current_user.id)
 
     query = db.query(Log).filter(Log.service_id == service_id)
 

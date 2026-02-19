@@ -5,17 +5,13 @@
   font-family: 'Space Grotesk', system-ui, sans-serif;
   line-height: 1.5;
   font-weight: 400;
-  --bg: #eef4ff;
-  --bg-alt: #e3eeff;
+  --bg: #f5f7fb;
   --panel: #ffffff;
-  --panel-2: #f3f8ff;
-  --stroke: #cbd9ee;
-  --text: #081427;
-  --muted: #5a6f91;
-  --accent: #1f6feb;
-  --accent-2: #7eb7ff;
-  --danger: #e5484d;
-  --shadow: 0 22px 45px rgba(15, 42, 88, 0.12);
+  --stroke: #e5e9f2;
+  --text: #0f172a;
+  --muted: #64748b;
+  --accent: #2563eb;
+  --danger: #dc2626;
 }
 
 * {
@@ -30,14 +26,13 @@ body,
 
 body {
   margin: 0;
-  background:
-    radial-gradient(circle at 0% 0%, rgba(151, 196, 255, 0.35), transparent 34%),
-    radial-gradient(circle at 85% 10%, rgba(122, 175, 255, 0.24), transparent 32%),
-    linear-gradient(180deg, #f5f9ff 0%, #edf4ff 100%);
+  background: var(--bg);
   color: var(--text);
 }
 
-button {
+button,
+input,
+select {
   font-family: inherit;
 }
 
